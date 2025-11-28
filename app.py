@@ -4,6 +4,9 @@ import joblib
 from pathlib import Path
 from flask import request, jsonify
 
+
+
+
 app = Flask(__name__)
 
 
@@ -190,3 +193,59 @@ def predict_data():
 
 if __name__ == "__main__":
     app.run(debug=True)
+
+
+# ##점수 code##
+# from flask import Flask, request, jsonify
+# import joblib
+# import pandas as pd
+# import numpy as np
+# from sklearn.preprocessing import StandardScaler
+
+# app = Flask(__name__)
+
+# # pkl 불러오기
+# model = joblib.load("lizhi_PCA_score_model.pkl")
+
+# X_cols = model["X_cols"]
+# year_weights = model["year_weights"]
+# pca_full = model["pca_full"]
+
+# # 스케일러는 전체 데이터 기준으로 생성
+# scaler = StandardScaler().fit(pca_full[X_cols])
+
+# # PCA loadings 평균값 사용
+# pca_weights = pca_full[[f"PCA_weight_{c}" for c in X_cols]].mean().values
+
+
+# @app.route("/predict_score", methods=["POST"])
+# def predict_score():
+#     data = request.json
+#     x = pd.DataFrame([data])
+
+#     # 점포 경쟁도 변환
+#     x["전체_역점포"] = 1/(x["전체점포수"]+1)
+#     x["음식점_역점포"] = 1/(x["음식점점포수"]+1)
+#     x["카페_역점포"]   = 1/(x["카페점포수"]+1)
+#     x["호프_역점포"]   = 1/(x["호프점포수"]+1)
+
+#     x = x[X_cols]
+
+#     # 스케일링
+#     x_scaled = scaler.transform(x)
+
+#     # PCA PC1 계산
+#     pc1 = np.dot(x_scaled, pca_weights)
+
+#     # 전체 데이터 대비 percentile 변환 (0~100)
+#     base_pc1 = pca_full["PC1_raw"].values
+#     percentile = (pc1 < base_pc1).mean() * 100
+
+#     return jsonify({
+#         "입지점수(0~100)": round(float(percentile), 4)
+#     })
+
+
+# if __name__ == "__main__":
+#     app.run(host="0.0.0.0", port=5000)
+
