@@ -6,3 +6,10 @@ pandas
 scikit-learn
 xgboost
 flask_cors
+
+
+# git 추가
+# git add .
+# git commit -m ""
+# git push origin main
+# git push origin mains
