@@ -19,41 +19,15 @@ dong_scores = {
     "hof": pd.read_excel("data/hof_XGBoost.xlsx", index_col=0)
 }
 
-# ---------------------------------------------------------
-# 2. /predict (업종별 개별 X값 직접 예측)
-# ---------------------------------------------------------
-@app.route("/predict", methods=["POST"])
-def predict():
-    data = request.json
-    shop_type = data.get("type")  # cafe / korean / hof
-
-    if shop_type not in models:
-        return jsonify({"error": "type은 cafe, korean, hof 중 하나여야 함"})
-
-    model = models[shop_type]
-
-    try:
-        X_input = [[
-            data["정규화매출효율"],
-            data["정규화성장률"],
-            data["정규화경쟁점수"],
-            data["작년 매출"],
-            data["이전 매출"],
-            data["작년 점포수"],
-            data["이전 점포수"]
-        ]]
-
-        y_pred = model.predict(X_input)[0]
-        return jsonify({
-            "업종": shop_type,
-            "예측Y": float(round(y_pred, 4))
-        })
-
-    except Exception as e:
-        return jsonify({"error": str(e)})
+# 🔥 업종별 원본 데이터 (X값 반환하기 위해 반드시 필요)
+original_data = {
+    "cafe": pd.read_excel("data/y추가완료_카페 데이터칼럼.xlsx"),
+    "korean": pd.read_excel("data/y추가완료_한식 데이터칼럼.xlsx"),
+    "hof": pd.read_excel("data/y추가완료_호프 데이터칼럼.xlsx")
+}
 
 # ---------------------------------------------------------
-# 3. /score?dong=OO&type=OO  (업종 1개 점수)
+# 2. /score?dong=OO&type=OO  (업종 1개 점수 + X값)
 # ---------------------------------------------------------
 @app.route("/score", methods=["GET"])
 def score():
@@ -63,34 +37,43 @@ def score():
     if shop_type not in dong_scores:
         return jsonify({"error": "type은 cafe, korean, hof 중 하나여야 함"})
 
+    # --- 1) 업종별 점수 데이터 ---
     scores = dong_scores[shop_type]
 
-    if dong in scores.index:
-        val = scores.loc[dong, "동별_평균점수"]
-        return jsonify({
-            "dong": dong,
-            "type": shop_type,
-            "score": float(round(val, 4))
-        })
-    else:
+    if dong not in scores.index:
         return jsonify({"error": f"{dong} 동을 찾을 수 없습니다."})
 
-# ---------------------------------------------------------
-# 4. /score_all?dong=OO (업종 3개 점수 한번에!)
-# ---------------------------------------------------------
-@app.route("/score_all", methods=["GET"])
-def score_all():
-    dong = request.args.get("dong")
+    score_val = float(round(scores.loc[dong, "동별_평균점수"], 4))
 
-    result = {"dong": dong}
+    # --- 2) 업종별 원본 데이터에서 X값 뽑기 ---
+    df_origin = original_data[shop_type]
 
-    for shop_type, df_scores in dong_scores.items():
-        if dong in df_scores.index:
-            result[shop_type] = float(round(df_scores.loc[dong, "동별_평균점수"], 4))
-        else:
-            result[shop_type] = None
+    # 해당 동이 여러 행이면 최신(연도+분기 가장 큰 값) 선택
+    dong_rows = df_origin[df_origin["행정동명"] == dong]
 
-    return jsonify(result)
+    if dong_rows.empty:
+        return jsonify({"error": f"{dong} 동의 X값을 찾을 수 없습니다."})
+
+    # 최신 데이터 1개 선택
+    dong_latest = dong_rows.sort_values(["연도", "분기"]).iloc[-1]
+
+    X_values = {
+        "정규화매출효율": float(dong_latest["정규화매출효율"]),
+        "정규화성장률": float(dong_latest["정규화성장률"]),
+        "정규화경쟁점수": float(dong_latest["정규화경쟁점수"]),
+        "작년 매출": float(dong_latest["작년 매출"]),
+        "이전 매출": float(dong_latest["이전 매출"]),
+        "작년 점포수": int(dong_latest["작년 점포수"]),
+        "이전 점포수": int(dong_latest["이전 점포수"])
+    }
+
+    # --- 3) 최종 응답 ---
+    return jsonify({
+        "dong": dong,
+        "type": shop_type,
+        "score": score_val,
+        "X값": X_values
+    })
 
 # ---------------------------------------------------------
 # 5. 실행
