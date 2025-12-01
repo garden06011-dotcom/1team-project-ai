@@ -10,6 +10,11 @@ CORS(app)
 
 # 순위 분석 데이터
 human_data = joblib.load("models/origin/human_data.pkl")  # 인구 데이터
+human_model = human_data['model']
+human_scaler=human_data['scaler']
+human_feature_cols=human_data['feature_cols']
+
+
 sales_data = joblib.load("models/origin/sales_data.pkl")  # 매출 데이터 
 store_data = joblib.load("models/origin/store_data.pkl")  # 상점 데이터
 cafe_data = joblib.load("models/origin/cafe_data.pkl")  # 카페 데이터
@@ -23,6 +28,11 @@ store_predict = joblib.load("models/predict/store_predict.pkl")  # 상점 예측
 cafe_predict = joblib.load("models/predict/cafe_predict.pkl")  # 카페 예측 모델
 food_predict = joblib.load("models/predict/food_predict.pkl")  # 음식점 예측 모델
 hof_predict = joblib.load("models/predict/hof_predict.pkl")  # 호프 예측 모델
+
+
+trnasfer = Transformer.from_crs("EPSG:4326", "EPSG:5179", always_xy=True) # 좌표 변환 객체
+
+
 
 
 
