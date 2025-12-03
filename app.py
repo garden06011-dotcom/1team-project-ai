@@ -1,24 +1,20 @@
 # #################################
-# 2026 예측모델 API
+# 2025 예측모델 API
 # #################################
 
 from flask import Flask, request, jsonify
-<<<<<<< HEAD
 from flask_cors import CORS
 import joblib
 import numpy as np
 import pandas as pd
 import os
 from pathlib import Path
-=======
 import pandas as pd
 import joblib
->>>>>>> d6874e5428f1e3bd8e2312a66607a9beab773049
 
 app = Flask(__name__)
 CORS(app)  # CORS 설정 추가
 
-<<<<<<< HEAD
 # ============================================================
 # 모델 파일 경로 설정
 # ============================================================
@@ -181,11 +177,11 @@ def predict_future_for_dong(
 try:
     prediction_artifact = load_prediction_model(PREDICTION_MODEL_PATH)
     prediction_df_raw = load_prediction_data(PREDICTION_DATA_PATH)
-    print("✅ 예측 모델 로드 완료")
+    print("예측 모델 로드 완료")
 except Exception as e:
     prediction_artifact = None
     prediction_df_raw = None
-    print(f"⚠️ 예측 모델 로드 실패: {e}")
+    print(f"예측 모델 로드 실패: {e}")
 
 # ============================================================
 # API 엔드포인트 - Store 데이터
@@ -343,83 +339,248 @@ def home():
         }
     }), 200
 
-if __name__ == "__main__":
-    app.run(debug=True, host='0.0.0.0', port=5000)
-=======
-# ---------------------------------------------------------
-# 1. 업종별 모델 & 점수 파일 로드
-# ---------------------------------------------------------
+
+
+# -----------------------------------------------------
+# 업종별 모델 로드
+# -----------------------------------------------------
 models = {
-    "cafe": joblib.load("models/cafe_XGBoost.pkl"),
-    "korean": joblib.load("models/hansic_XGBoost.pkl"),
-    "hof": joblib.load("models/hof_XGBoost.pkl")
+    "cafe": joblib.load("models/lgb_2025_model_cafe.pkl"),
+    "hansic": joblib.load("models/lgb_2025_model_hansic.pkl"),
+    "hof": joblib.load("models/lgb_2025_model_hof.pkl"),
 }
 
-dong_scores = {
-    "cafe": pd.read_excel("data/cafe_XGBoost.xlsx", index_col=0),
-    "korean": pd.read_excel("data/hansic_XGBoost.xlsx", index_col=0),
-    "hof": pd.read_excel("data/hof_XGBoost.xlsx", index_col=0)
+# -----------------------------------------------------
+# 업종별 원본 데이터 로드 (2022~2024 실제 + 2024 Q4 예측까지 포함된 엑셀)
+# -----------------------------------------------------
+dataframes = {
+    "cafe": pd.read_excel("data/카페_정렬+정규화(결측지 완).xlsx"),
+    "hansic": pd.read_excel("data/한식_정렬+정규화(결측치 완).xlsx"),
+    "hof": pd.read_excel("data/호프_정렬+정규화(결측치 완).xlsx"),
 }
 
-# 🔥 업종별 원본 데이터 (X값 반환하기 위해 반드시 필요)
-original_data = {
-    "cafe": pd.read_excel("data/y추가완료_카페 데이터칼럼.xlsx"),
-    "korean": pd.read_excel("data/y추가완료_한식 데이터칼럼.xlsx"),
-    "hof": pd.read_excel("data/y추가완료_호프 데이터칼럼.xlsx")
-}
+# -----------------------------------------------------
+# Feature 목록 (모델 학습에 사용한 값)
+# -----------------------------------------------------
+FEATURE_COLS = [
+    "정규화매출효율",
+    "정규화성장률",
+    "정규화경쟁밀도",
+    "매출",
+    "작년 매출",
+    "이전 매출",
+    "총 점포수",
+    "작년 점포수",
+    "이전 점포수",
+    "임대료",
+    "연도",
+    "분기",
+]
 
-# ---------------------------------------------------------
-# 2. /score?dong=OO&type=OO  (업종 1개 점수 + X값)
-# ---------------------------------------------------------
-@app.route("/score", methods=["GET"])
-def score():
-    dong = request.args.get("dong")
-    shop_type = request.args.get("type")  # cafe / korean / hof
+# -----------------------------------------------------
+# 사용자 임대료 계산 함수
+#  환산임대료 = (보증금 × 12%) / 12 + 월세
+#  평당_임대료 = 환산임대료 / (면적㎡ / 3.3)
+#  사용자_총액 = 평당_임대료 × 사용자_평수
+# -----------------------------------------------------
+def calculate_user_rent(deposit, monthly, area_pyeong):
+    # 보증금의 월 환산
+    deposit_month = (deposit * 0.12) / 12
+    converted_monthly = deposit_month + monthly
 
-    if shop_type not in dong_scores:
-        return jsonify({"error": "type은 cafe, korean, hof 중 하나여야 함"})
+    # 1평 = 3.3㎡
+    area_m2 = area_pyeong * 3.3
+    rent_per_pyeong = converted_monthly / (area_m2 / 3.3)
 
-    # --- 1) 업종별 점수 데이터 ---
-    scores = dong_scores[shop_type]
+    total_rent = rent_per_pyeong * area_pyeong
+    return total_rent
 
-    if dong not in scores.index:
-        return jsonify({"error": f"{dong} 동을 찾을 수 없습니다."})
 
-    score_val = float(round(scores.loc[dong, "동별_평균점수"], 4))
+# -----------------------------------------------------
+# /predict_custom API
+#   - 쿼리: gu, type(cafe/hansic/hof), deposit, monthly, area, top_n(optional)
+#   - 로직:
+#       1) 사용자 임대료 계산 후, 강제 임대료_구간 산정 (1~5)
+#       2) 해당 구 + 임대료_구간 데이터가 없으면 → 가장 가까운 구간으로 자동 보정
+#       3) 그 구간에 포함된 모든 행정동에 대해 2025Q1 점수 예측
+#       4) 점수 기준 내림차순 정렬 후 순위 부여
+#       5) 상위 top_n 반환 + 1위 동의 상세 데이터 포함
+# -----------------------------------------------------
+@app.route("/predict_custom", methods=["GET"])
+def predict_custom():
+    try:
+        print("=" * 50)
+        print("predict_custom API 호출됨")
+        print("=" * 50)
+        
+        # ============================
+        # 1️⃣ 요청 파라미터 받기
+        # ============================
+        shop_type = request.args.get("type", "cafe")
+        gu = request.args.get("gu")
+        
+        print(f"요청 파라미터:")
+        print(f"  - type: {shop_type}")
+        print(f"  - gu: {gu}")
+        print(f"  - deposit: {request.args.get('deposit')}")
+        print(f"  - monthly: {request.args.get('monthly')}")
+        print(f"  - area: {request.args.get('area')}")
 
-    # --- 2) 업종별 원본 데이터에서 X값 뽑기 ---
-    df_origin = original_data[shop_type]
+        deposit = request.args.get("deposit")
+        monthly = request.args.get("monthly")
+        area = request.args.get("area")
 
-    # 해당 동이 여러 행이면 최신(연도+분기 가장 큰 값) 선택
-    dong_rows = df_origin[df_origin["행정동명"] == dong]
+        # 필수 파라미터 검증
+        if not gu:
+            return jsonify({"error": "gu 파라미터가 필요합니다."}), 400
+        if not deposit or not monthly or not area:
+            return jsonify({"error": "deposit, monthly, area 파라미터가 모두 필요합니다."}), 400
 
-    if dong_rows.empty:
-        return jsonify({"error": f"{dong} 동의 X값을 찾을 수 없습니다."})
+        try:
+            deposit = float(deposit)
+            monthly = float(monthly)
+            area = float(area)
+        except (ValueError, TypeError):
+            return jsonify({"error": "deposit, monthly, area는 숫자여야 합니다."}), 400
 
-    # 최신 데이터 1개 선택
-    dong_latest = dong_rows.sort_values(["연도", "분기"]).iloc[-1]
+        if shop_type not in models:
+            return jsonify({"error": "type은 cafe / hansic / hof 중 하나여야 합니다."}), 400
 
-    X_values = {
-        "정규화매출효율": float(dong_latest["정규화매출효율"]),
-        "정규화성장률": float(dong_latest["정규화성장률"]),
-        "정규화경쟁점수": float(dong_latest["정규화경쟁점수"]),
-        "작년 매출": float(dong_latest["작년 매출"]),
-        "이전 매출": float(dong_latest["이전 매출"]),
-        "작년 점포수": int(dong_latest["작년 점포수"]),
-        "이전 점포수": int(dong_latest["이전 점포수"])
-    }
+        df = dataframes[shop_type]
+        model = models[shop_type]
 
-    # --- 3) 최종 응답 ---
-    return jsonify({
-        "dong": dong,
-        "type": shop_type,
-        "score": score_val,
-        "X값": X_values
-    })
+        # ============================
+        # 2️⃣ 사용자 임대료 재계산 (핵심!!)
+        # ============================
+        user_rent = calculate_user_rent(deposit, monthly, area)
+
+        # ============================
+        # 3️⃣ 구 필터링
+        # ============================
+        # 디버깅: 사용 가능한 구 목록 확인
+        available_gu = df["구"].unique().tolist()
+        print(f"요청된 구: {gu}")
+        print(f"사용 가능한 구 목록: {available_gu[:10]}...")  # 처음 10개만 출력
+        
+        gu_df = df[df["구"] == gu].copy()
+
+        if gu_df.empty:
+            # 유사한 구 이름 찾기
+            similar_gu = [g for g in available_gu if gu in str(g) or str(g) in gu]
+            error_msg = f"{gu} 데이터가 없습니다."
+            if similar_gu:
+                error_msg += f" 유사한 구: {similar_gu[:5]}"
+            return jsonify({"error": error_msg, "available_gu": available_gu[:20]}), 404
+
+        # ============================
+        # 4️⃣ 각 행정동 최신 데이터 추출
+        # ============================
+        latest_df = (
+            gu_df
+            .sort_values(["행정동코드", "연도", "분기"])
+            .groupby("행정동코드")
+            .tail(1)
+            .reset_index(drop=True)
+        )
+
+        # ============================
+        # 5️⃣ 사용자 임대료 반영하여 2025 feature 생성
+        # ============================
+        rows = []
+
+        for _, r in latest_df.iterrows():
+            row = {
+                "정규화매출효율": r["정규화매출효율"],
+                "정규화성장률": r["정규화성장률"],
+                "정규화경쟁밀도": r["정규화경쟁밀도"],
+
+                "매출": r["매출"],
+                "작년 매출": r["작년 매출"],
+                "이전 매출": r["이전 매출"],
+
+                "총 점포수": r["총 점포수"],
+                "작년 점포수": r["작년 점포수"],
+                "이전 점포수": r["이전 점포수"],
+
+                # ✅ 반드시 사용자 임대료로 덮어씌움
+                "임대료": user_rent,
+
+                "연도": 2025,
+                "분기": 1,
+
+                "행정동명": r["행정동명"]
+            }
+
+            rows.append(row)
+
+        X_all = pd.DataFrame(rows)
+        X_model = X_all[FEATURE_COLS]
+
+        # ============================
+        # 6️⃣ 전체 동 점수 예측
+        # ============================
+        preds = model.predict(X_model)
+        X_all["예측_Y"] = preds
+
+        # ============================
+        # 7️⃣ 점수 순위 정렬
+        # ============================
+        X_all = X_all.sort_values("예측_Y", ascending=False).reset_index(drop=True)
+        X_all["rank"] = X_all.index + 1
+
+        # ============================
+        # 8️⃣ 1위 동 상세 데이터 추출
+        # ============================
+        best = X_all.iloc[0]
+
+        best_detail = {
+            "rank": 1,
+            "dong": best["행정동명"],
+            "predicted_Y": float(best["예측_Y"]),
+            "매출": float(best["매출"]),
+            "총점포수": int(best["총 점포수"]),
+            "정규화매출효율": float(best["정규화매출효율"]),
+            "정규화성장률": float(best["정규화성장률"]),
+            "정규화경쟁밀도": float(best["정규화경쟁밀도"])
+        }
+
+        # ============================
+        # 9️⃣ Top 10 랭킹 반환
+        # ============================
+        ranking = X_all.head(10)[["rank", "행정동명", "예측_Y"]].to_dict(orient="records")
+
+        result = {
+            "gu": gu,
+            "type": shop_type,
+            "user_input": {
+                "deposit": deposit,
+                "monthly": monthly,
+                "area": area,
+                "calculated_rent": user_rent
+            },
+            "top10": ranking,
+            "best_dong_detail": best_detail,
+            "message": "✅ 사용자 임대료 반영 2025년 동별 Y점수 예측 완료"
+        }
+        
+        print(f"predict_custom API 성공: {len(ranking)}개 동 반환")
+        print("=" * 50)
+        
+        return jsonify(result)
+
+    except Exception as e:
+        print(f"predict_custom API 오류 발생: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        print("=" * 50)
+        return jsonify({"error": f"예측 중 오류 발생: {str(e)}"}), 500
+
+
+
+
 
 # ---------------------------------------------------------
 # 5. 실행
 # ---------------------------------------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
->>>>>>> d6874e5428f1e3bd8e2312a66607a9beab773049
+    app.run(host="127.0.0.1", port=5000, debug=True)
